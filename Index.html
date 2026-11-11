@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>골드스타 정기 재고조사</title>
+<style>
+  :root{--main:#1f3a5f;--accent:#e6007e;--bg:#f4f6f9;--line:#d9dee5}
+  *{box-sizing:border-box;font-family:-apple-system,"Malgun Gothic",sans-serif}
+  body{margin:0;background:var(--bg);color:#222}
+  header{background:var(--main);color:#fff;padding:20px 16px}
+  header small{opacity:.7;letter-spacing:2px;font-size:11px}
+  header h1{margin:4px 0 6px;font-size:20px}
+  header p{margin:0;font-size:13px;opacity:.85}
+  .card{background:#fff;margin:12px;padding:16px;border-radius:10px;border:1px solid var(--line)}
+  h2{font-size:15px;margin:0 0 10px}
+  input,select{width:100%;padding:10px;border:1px solid var(--line);border-radius:6px;font-size:15px;background:#fff;color:#222}
+  select:disabled{background:#f1f3f6;color:#999}
+  .row{display:flex;gap:8px}
+  .row > *{flex:1;min-width:0}
+  button{padding:11px 14px;border:0;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer}
+  .btn-main{background:var(--main);color:#fff;flex:0 0 auto}
+  .btn-sub{background:#eef1f5;color:var(--main);width:100%;margin-top:8px}
+  .btn-submit{background:var(--accent);color:#fff;width:100%;margin-top:12px;padding:14px}
+  button:disabled{opacity:.5}
+  .hint{font-size:12px;color:#777;margin-top:6px}
+  .store{font-size:17px;font-weight:700;color:var(--main)}
+  .badge{display:inline-block;padding:3px 8px;border-radius:4px;font-size:12px;color:#fff;margin-left:6px}
+  .item{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px}
+  .item-head{display:flex;justify-content:space-between;font-size:13px;color:#555;margin-bottom:6px}
+  .item .row{margin-top:6px}
+  .del{background:none;color:#c00;padding:0;font-size:13px}
+  .hide{display:none}
+  .msg{padding:12px;border-radius:6px;margin:12px;font-size:14px}
+  .err{background:#fdecec;color:#b00}
+  .ok{background:#e9f7ef;color:#16733f}
+  label.chk{display:flex;gap:8px;font-size:13px;margin-top:10px}
+  label.chk input{width:auto}
+</style>
+</head>
+<body>
+<header>
+  <small>GOLDSTAR STOCK CHECK</small>
+  <h1>골드스타 정기 재고조사</h1>
+  <p>최초 제출은 보유 재고 전체, 추가 제출은 누락분만 입력해 주세요.</p>
+</header>
+
+<div id="msg"></div>
+
+<!-- 1. 거래처 확인 -->
+<div class="card" id="step1">
+  <h2>거래처 확인</h2>
+  <div class="row">
+    <input id="pcode" placeholder="P코드 입력" autocomplete="off">
+    <button class="btn-main" id="btnLookup" onclick="lookup()">조회</button>
+  </div>
+  <div class="hint">P코드는 거래처 식별용입니다.</div>
+</div>
+
+<!-- 2. 재고 입력 -->
+<div id="step2" class="hide">
+  <div class="card">
+    <div class="store"><span id="storeName"></span><span id="typeBadge" class="badge"></span></div>
+    <div class="hint" id="storeInfo"></div>
+    <button class="btn-sub" onclick="reset()">거래처 변경</button>
+  </div>
+
+  <div class="card">
+    <h2>보유 재고 입력</h2>
+    <div class="hint" style="margin-bottom:10px">기본 10개. 부족하면 재고 추가를 눌러주세요.</div>
+    <div id="items"></div>
+    <button class="btn-sub" onclick="addItem()">+ 재고 추가</button>
+  </div>
+
+  <div class="card">
+    <input id="checker" placeholder="확인자 이름">
+    <label class="chk"><input type="checkbox" id="agree">
+      입력한 재고의 모델명, 색상, 일련번호, 개봉여부를 확인했습니다.</label>
+    <button class="btn-submit" id="btnSubmit" onclick="submit()">재고 제출</button>
+  </div>
+</div>
+
+<script>
+/* ===== 설정: Apps Script 웹앱 URL (/exec) ===== */
+const API_URL = 'https://script.google.com/macros/s/AKfycbw7eebw9BDHC5zlWwww7J9rgHeCMazZX_lYxgW-HJCqpHvxYYtF78valDEsnemdG_sk/exec';
+
+/** API 호출 (text/plain으로 보내 CORS 사전요청 회피) */
+async function api(action, body){
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ action }, body))
+  });
+  if (!res.ok) throw new Error('서버 연결 오류 (' + res.status + ')');
+  const r = await res.json();
+  if (!r.ok) throw new Error(r.error || '처리 중 오류가 발생했습니다.');
+  return r.data;
+}
+
+let store = null;
+let models = [];          // [{model, colors:[]}]
+let modelOptions = '';    // 모델 드롭다운 HTML (1회 생성 후 재사용)
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function showMsg(text, ok){
+  $('msg').innerHTML = text ? `<div class="msg ${ok?'ok':'err'}">${text}</div>` : '';
+  if (text) window.scrollTo(0,0);
+}
+
+async function lookup(){
+  const p = $('pcode').value.trim();
+  if (!p) return showMsg('P코드를 입력해 주세요.');
+  $('btnLookup').disabled = true; showMsg('');
+  try {
+    const s = await api('lookup', { pcode: p });
+    store = s;
+    models = s.models || [];
+    if (!models.length) return showMsg('등록된 모델이 없습니다. 관리자에게 문의해 주세요.');
+    modelOptions = '<option value="">모델 선택</option>' +
+      models.map(m => `<option value="${esc(m.model)}">${esc(m.model)}</option>`).join('');
+
+    $('storeName').textContent = s.name;
+    const first = s.prevCount === 0;
+    $('typeBadge').textContent = first ? '최초 제출' : '추가 제출';
+    $('typeBadge').style.background = first ? '#1f3a5f' : '#e6007e';
+    $('storeInfo').textContent = `${s.pcode} / 담당 ${s.manager||'-'} / 기존 제출 ${s.prevCount}건`;
+    $('btnSubmit').textContent = first ? '재고 제출' : '누락분 추가 제출';
+    $('step1').classList.add('hide'); $('step2').classList.remove('hide');
+    $('items').innerHTML = ''; for (let i=0;i<10;i++) addItem();
+  } catch (e) {
+    showMsg(e.message);
+  } finally {
+    $('btnLookup').disabled = false;
+  }
+}
+
+/** 모델 선택 시 해당 모델의 색상만 표시 */
+function onModelChange(sel){
+  const color = sel.closest('.item').querySelector('.color');
+  const m = models.find(x => x.model === sel.value);
+  const colors = m ? m.colors : [];
+  if (!sel.value) {
+    color.innerHTML = '<option value="">색상 선택</option>'; color.disabled = true;
+  } else if (!colors.length) {
+    color.innerHTML = '<option value="">색상 없음</option>'; color.disabled = true;
+  } else {
+    color.innerHTML = '<option value="">색상 선택</option>' +
+      colors.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    color.disabled = false;
+    if (colors.length === 1) color.value = colors[0]; // 색상 1개면 자동 선택
+  }
+}
+
+function addItem(){
+  const d = document.createElement('div');
+  d.className = 'item';
+  d.innerHTML = `
+    <div class="item-head"><b class="no"></b><button class="del" onclick="this.closest('.item').remove();renum()">삭제</button></div>
+    <div class="row">
+      <select class="model" onchange="onModelChange(this)">${modelOptions}</select>
+      <select class="color" disabled><option value="">색상 선택</option></select>
+    </div>
+    <div class="row"><input class="serial" placeholder="일련번호" autocapitalize="characters">
+      <select class="opened"><option>미개봉</option><option>개봉</option></select></div>`;
+  $('items').appendChild(d); renum();
+}
+function renum(){ document.querySelectorAll('.item .no').forEach((e,i)=>e.textContent=(i+1)+'번'); }
+
+async function submit(){
+  if (!$('agree').checked) return showMsg('확인 체크박스를 선택해 주세요.');
+  const items = [...document.querySelectorAll('.item')].map(d => ({
+    model:d.querySelector('.model').value, color:d.querySelector('.color').value,
+    serial:d.querySelector('.serial').value, opened:d.querySelector('.opened').value }));
+  $('btnSubmit').disabled = true; showMsg('');
+  try {
+    const r = await api('submit', { payload: { pcode: store.pcode, checker: $('checker').value, items } });
+    showMsg(`${r.type} 제출 완료: ${r.count}건 (누적 ${r.total}건)<br>제출번호 ${r.id}`, true);
+    reset(true);
+  } catch (e) {
+    $('btnSubmit').disabled = false;
+    showMsg(e.message);
+  }
+}
+
+function reset(keepMsg){
+  if (!keepMsg) showMsg('');
+  store = null; $('pcode').value=''; $('checker').value=''; $('agree').checked=false;
+  $('btnSubmit').disabled = false;
+  $('step2').classList.add('hide'); $('step1').classList.remove('hide');
+}
+$('pcode').addEventListener('keydown', e => { if (e.key==='Enter') lookup(); });
+</script>
+</body>
+</html>
